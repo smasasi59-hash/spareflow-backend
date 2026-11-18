@@ -15,10 +15,15 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Helper to sanitize URLs (always ensure http:// or https:// and no trailing slash)
+// Helper to sanitize URLs (always ensure http:// or https://, strip markdown wrappers, and remove trailing slashes)
 function sanitizeUrl(url, defaultUrl) {
   let clean = (url || defaultUrl || "").toString().trim();
   if (!clean) return defaultUrl;
+  const mdMatch = clean.match(/\[.*?\]\((https?:\/\/[^\s\)]+)\)/i) || clean.match(/\((https?:\/\/[^\s\)]+)\)/i);
+  if (mdMatch) {
+    clean = mdMatch[1];
+  }
+  clean = clean.replace(/[\[\]\(\)]/g, "").trim();
   if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
     clean = "https://" + clean;
   }
@@ -34,7 +39,7 @@ if (cleanBaseUrl.endsWith("/payments")) {
 const SASI_PAY_BASE_URL = cleanBaseUrl;
 
 const SASI_PAY_SECRET_KEY =
-  (process.env.SASI_PAY_SECRET_KEY || "test_04ed2c9368cb9029").toString().trim();
+  (process.env.SASI_PAY_SECRET_KEY || "").toString().trim();
 const FIREBASE_PROJECT_ID =
   (process.env.FIREBASE_PROJECT_ID || "lito-684b2").toString().trim();
 const BACKEND_URL = sanitizeUrl(
