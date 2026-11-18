@@ -260,7 +260,7 @@ const handleInitiatePayment = async (req, res) => {
         apiErr.response?.data?.message ||
         apiErr.response?.data?.error ||
         apiErr.message;
-        apiErr.message;
+      apiErr.message;
 
       // Save failed record in Firestore if db is ready
       if (db) {
@@ -481,12 +481,22 @@ const handleWebhook = async (req, res) => {
         if (shopDoc.exists) {
           const shopData = shopDoc.data();
           const currentExpiry = shopData.subscriptionExpiryDate || shopData.expiryDate;
-          const currentPlan = shopData.subscriptionPlanId || shopData.plan;
-          // If already on a paid active plan, extend; if trial or expired, start from now
-          if (currentPlan !== "trial" && currentExpiry && currentExpiry.toDate) {
-            const currentExpiryDate = currentExpiry.toDate();
-            if (currentExpiryDate > baseDate) {
+          if (currentExpiry) {
+            let currentExpiryDate = null;
+            if (typeof currentExpiry.toDate === "function") {
+              currentExpiryDate = currentExpiry.toDate();
+            } else if (currentExpiry instanceof Date) {
+              currentExpiryDate = currentExpiry;
+            } else if (typeof currentExpiry === "string") {
+              currentExpiryDate = new Date(currentExpiry);
+            }
+            // Ikiwa tarehe ya sasa bado ipo mbele (iwe Free Trial au Kifurushi kilichopo),
+            // jumlisha siku za kifurushi kipya kuanzia tarehe hiyo iliyobaki badala ya leo!
+            if (currentExpiryDate && !isNaN(currentExpiryDate.getTime()) && currentExpiryDate > baseDate) {
               baseDate = currentExpiryDate;
+              console.log(
+                `[Expiry Calculation] Tarehe ya sasa (${currentExpiryDate.toISOString()}) iko mbele. Siku ${durationDays} zitaongezwa kuanzia tarehe hiyo.`
+              );
             }
           }
         }
@@ -591,7 +601,7 @@ const handleStatusCheck = async (req, res) => {
         const baseWithoutPayments = cleanBaseUrl.replace(/\/payments\/?$/, "");
         const sasiQueryRef = (paymentDoc && paymentDoc.exists && paymentDoc.data()?.sasiReference) || reference;
         const checkUrl = `${baseWithoutPayments}/payments/${sasiQueryRef}`;
-        
+
         console.log(`[Sasi Pay Status Check] GET ${checkUrl}`);
         const sasiRes = await axios.get(
           checkUrl,
@@ -633,10 +643,23 @@ const handleStatusCheck = async (req, res) => {
               if (shopDoc.exists) {
                 const sData = shopDoc.data();
                 const currentExpiry = sData.subscriptionExpiryDate || sData.expiryDate;
-                const currentPlan = sData.subscriptionPlanId || sData.plan;
-                if (currentPlan !== "trial" && currentExpiry && currentExpiry.toDate) {
-                  const curr = currentExpiry.toDate();
-                  if (curr > baseDate) baseDate = curr;
+                if (currentExpiry) {
+                  let currentExpiryDate = null;
+                  if (typeof currentExpiry.toDate === "function") {
+                    currentExpiryDate = currentExpiry.toDate();
+                  } else if (currentExpiry instanceof Date) {
+                    currentExpiryDate = currentExpiry;
+                  } else if (typeof currentExpiry === "string") {
+                    currentExpiryDate = new Date(currentExpiry);
+                  }
+                  // Ikiwa tarehe ya sasa bado ipo mbele (iwe Free Trial au Kifurushi kilichopo),
+                  // jumlisha siku za kifurushi kipya kuanzia tarehe hiyo iliyobaki badala ya leo!
+                  if (currentExpiryDate && !isNaN(currentExpiryDate.getTime()) && currentExpiryDate > baseDate) {
+                    baseDate = currentExpiryDate;
+                    console.log(
+                      `[Expiry Calculation - Status Check] Tarehe ya sasa (${currentExpiryDate.toISOString()}) iko mbele. Siku ${durationDays} zitaongezwa kuanzia tarehe hiyo.`
+                    );
+                  }
                 }
               }
               const newExpiry = new Date(
