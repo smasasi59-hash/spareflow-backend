@@ -5,6 +5,7 @@ const axios = require("axios");
 const admin = require("firebase-admin");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,6 +41,8 @@ const SASI_PAY_BASE_URL = cleanBaseUrl;
 
 const SASI_PAY_SECRET_KEY =
   (process.env.SASI_PAY_SECRET_KEY || "").toString().trim();
+const SASI_WEBHOOK_SECRET =
+  (process.env.SASI_WEBHOOK_SECRET || "whsec_f0c794d61455746d06782578b4d91aae3e9eb66b3336e7f1").toString().trim();
 const FIREBASE_PROJECT_ID =
   (process.env.FIREBASE_PROJECT_ID || "lito-684b2").toString().trim();
 const BACKEND_URL = sanitizeUrl(
@@ -136,8 +139,9 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     service: "SpareFlow Sasi Pay Backend",
-    version: "1.0.3",
+    version: "1.0.4",
     formatPhone: "255XXXXXXXXX",
+    hasWebhookSecret: Boolean(SASI_WEBHOOK_SECRET),
     sasiBaseUrl: SASI_PAY_BASE_URL,
     backendUrl: BACKEND_URL,
     firebaseProject: FIREBASE_PROJECT_ID,
@@ -341,6 +345,30 @@ const handleWebhook = async (req, res) => {
   try {
     const payload = req.body || {};
     console.log("Sasi Pay Webhook Callback received:", JSON.stringify(payload));
+
+    const signature =
+      req.headers["x-sasi-signature"] ||
+      req.headers["x-signature"] ||
+      req.headers["sasi-signature"] ||
+      req.headers["signature"];
+
+    if (signature && SASI_WEBHOOK_SECRET) {
+      try {
+        const computed = crypto
+          .createHmac("sha256", SASI_WEBHOOK_SECRET)
+          .update(JSON.stringify(payload))
+          .digest("hex");
+        if (computed.toLowerCase() === signature.toLowerCase()) {
+          console.log("[Webhook] Sasi Pay signature verified successfully.");
+        } else {
+          console.warn(
+            `[Webhook Notice] Signature check: received=${signature}, computed=${computed}`
+          );
+        }
+      } catch (sigErr) {
+        console.warn("[Webhook] Signature verification error:", sigErr.message);
+      }
+    }
 
     const data = payload.data || payload;
     const merchantRef = data.merchant_reference || payload.merchant_reference;
