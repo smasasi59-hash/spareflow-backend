@@ -219,6 +219,7 @@ const handleInitiatePayment = async (req, res) => {
       reference: reference,
       narration: `SpareFlow Subscription - ${planName || planId}`,
       callback_url: webhookUrl,
+      webhook_url: webhookUrl,
       metadata: {
         shopId: shopId,
         userId: userId || "",
@@ -371,16 +372,17 @@ const handleWebhook = async (req, res) => {
     }
 
     const data = payload.data || payload;
-    const merchantRef = data.merchant_reference || payload.merchant_reference;
-    const sasiRef = data.reference || payload.reference;
+    const merchantRef = data.merchant_reference || payload.merchant_reference || (data.metadata && data.metadata.reference);
+    const sasiRef = data.reference || payload.reference || data.id || payload.id;
     const targetRef = merchantRef || sasiRef;
-    const rawStatus = (data.status || payload.status || "")
+    const rawStatus = (data.status || payload.status || payload.event || "")
       .toString()
       .toLowerCase();
 
+    // If test ping or health check webhook from Sasi Pay dashboard
     if (!targetRef) {
-      console.warn("Webhook missing reference:", payload);
-      return res.status(400).json({ error: "Missing reference" });
+      console.warn("Webhook received without reference (possible ping/test):", payload);
+      return res.status(200).json({ received: true, message: "Webhook ping received" });
     }
 
     if (!db) {
@@ -430,36 +432,45 @@ const handleWebhook = async (req, res) => {
 
     let paymentData = paymentDoc ? paymentDoc.data() : null;
 
-    // Payment Successful
-    if (
+    // Check if status represents successful payment
+    const isSuccess =
       rawStatus === "completed" ||
       rawStatus === "success" ||
-      rawStatus === "successful"
-    ) {
-      console.log(`Malipo ya reference ${reference} yamekamilika! Inawasha kifurushi...`);
+      rawStatus === "successful" ||
+      rawStatus.includes("success") ||
+      rawStatus.includes("complete") ||
+      rawStatus.includes("paid");
 
-      await targetDocRef.set(
-        {
-          status: "completed",
-          completedAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          webhookPayload: payload,
-        },
-        { merge: true }
-      );
+    if (isSuccess) {
+      console.log(`Malipo ya reference ${targetRef} yamekamilika! Inawasha kifurushi...`);
+
+      if (targetDocRef) {
+        await targetDocRef.set(
+          {
+            status: "completed",
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            webhookPayload: payload,
+          },
+          { merge: true }
+        );
+      }
 
       const shopId =
         (paymentData && paymentData.shopId) ||
-        (data.metadata && data.metadata.shopId);
+        (data.metadata && data.metadata.shopId) ||
+        (payload.metadata && payload.metadata.shopId);
       const durationDays = parseInt(
         (paymentData && paymentData.durationDays) ||
         (data.metadata && data.metadata.durationDays) ||
+        (payload.metadata && payload.metadata.durationDays) ||
         30,
         10
       );
       const planId =
         (paymentData && paymentData.planId) ||
         (data.metadata && data.metadata.planId) ||
+        (payload.metadata && payload.metadata.planId) ||
         "1_month";
 
       if (shopId) {
@@ -469,8 +480,10 @@ const handleWebhook = async (req, res) => {
         let baseDate = new Date();
         if (shopDoc.exists) {
           const shopData = shopDoc.data();
-          const currentExpiry = shopData.subscriptionExpiryDate;
-          if (currentExpiry && currentExpiry.toDate) {
+          const currentExpiry = shopData.subscriptionExpiryDate || shopData.expiryDate;
+          const currentPlan = shopData.subscriptionPlanId || shopData.plan;
+          // If already on a paid active plan, extend; if trial or expired, start from now
+          if (currentPlan !== "trial" && currentExpiry && currentExpiry.toDate) {
             const currentExpiryDate = currentExpiry.toDate();
             if (currentExpiryDate > baseDate) {
               baseDate = currentExpiryDate;
@@ -484,12 +497,17 @@ const handleWebhook = async (req, res) => {
 
         await shopRef.set(
           {
+            status: "active",
             subscriptionStatus: "active",
-            subscriptionExpiryDate:
-              admin.firestore.Timestamp.fromDate(newExpiryDate),
+            plan: planId,
+            planId: planId,
             subscriptionPlanId: planId,
-            lastSubscriptionPaymentRef: reference,
-            lastSubscriptionAmount: (paymentData && paymentData.amount) || 0,
+            hasUsedTrial: true,
+            expiryDate: admin.firestore.Timestamp.fromDate(newExpiryDate),
+            subscriptionExpiryDate: admin.firestore.Timestamp.fromDate(newExpiryDate),
+            lastPaymentRef: targetRef,
+            lastSubscriptionPaymentRef: targetRef,
+            lastSubscriptionAmount: (paymentData && paymentData.amount) || (data.amount ? parseInt(data.amount, 10) : 0),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -504,30 +522,34 @@ const handleWebhook = async (req, res) => {
       rawStatus === "expired" ||
       rawStatus === "cancelled"
     ) {
-      await targetDocRef.set(
-        {
-          status: rawStatus,
-          failureReason:
-            data.message || payload.message || `Malipo ${rawStatus}`,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          webhookPayload: payload,
-        },
-        { merge: true }
-      );
+      if (targetDocRef) {
+        await targetDocRef.set(
+          {
+            status: rawStatus,
+            failureReason:
+              data.message || payload.message || `Malipo ${rawStatus}`,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            webhookPayload: payload,
+          },
+          { merge: true }
+        );
+      }
     } else {
-      await targetDocRef.set(
-        {
-          status: rawStatus || "processing",
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          webhookPayload: payload,
-        },
-        { merge: true }
-      );
+      if (targetDocRef) {
+        await targetDocRef.set(
+          {
+            status: rawStatus || "processing",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            webhookPayload: payload,
+          },
+          { merge: true }
+        );
+      }
     }
 
     return res
       .status(200)
-      .json({ success: true, reference: reference, status: rawStatus });
+      .json({ received: true, success: true, reference: targetRef, status: rawStatus });
   } catch (err) {
     console.error("Webhook processing error:", err);
     return res.status(500).json({ error: err.message });
@@ -548,8 +570,9 @@ const handleStatusCheck = async (req, res) => {
       return res.status(400).json({ error: "Reference is required" });
     }
 
+    let paymentDoc = null;
     if (db) {
-      const paymentDoc = await db
+      paymentDoc = await db
         .collection("subscription_payments")
         .doc(reference)
         .get();
@@ -584,8 +607,8 @@ const handleStatusCheck = async (req, res) => {
         if (status === "completed" || status === "success") {
           if (db) {
             const paymentDocRef = db.collection("subscription_payments").doc(reference);
-            const paymentDoc = await paymentDocRef.get();
-            const pData = paymentDoc.exists ? paymentDoc.data() : {};
+            const latestDoc = await paymentDocRef.get();
+            const pData = latestDoc.exists ? latestDoc.data() : {};
 
             await paymentDocRef.set(
               {
@@ -609,8 +632,10 @@ const handleStatusCheck = async (req, res) => {
               let baseDate = new Date();
               if (shopDoc.exists) {
                 const sData = shopDoc.data();
-                if (sData.subscriptionExpiryDate?.toDate) {
-                  const curr = sData.subscriptionExpiryDate.toDate();
+                const currentExpiry = sData.subscriptionExpiryDate || sData.expiryDate;
+                const currentPlan = sData.subscriptionPlanId || sData.plan;
+                if (currentPlan !== "trial" && currentExpiry && currentExpiry.toDate) {
+                  const curr = currentExpiry.toDate();
                   if (curr > baseDate) baseDate = curr;
                 }
               }
@@ -619,10 +644,15 @@ const handleStatusCheck = async (req, res) => {
               );
               await shopRef.set(
                 {
+                  status: "active",
                   subscriptionStatus: "active",
-                  subscriptionExpiryDate:
-                    admin.firestore.Timestamp.fromDate(newExpiry),
+                  plan: planId,
+                  planId: planId,
                   subscriptionPlanId: planId,
+                  hasUsedTrial: true,
+                  expiryDate: admin.firestore.Timestamp.fromDate(newExpiry),
+                  subscriptionExpiryDate: admin.firestore.Timestamp.fromDate(newExpiry),
+                  lastPaymentRef: reference,
                   lastSubscriptionPaymentRef: reference,
                   updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                 },
