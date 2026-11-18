@@ -136,7 +136,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     service: "SpareFlow Sasi Pay Backend",
-    version: "1.0.2",
+    version: "1.0.3",
     formatPhone: "255XXXXXXXXX",
     sasiBaseUrl: SASI_PAY_BASE_URL,
     backendUrl: BACKEND_URL,
@@ -289,8 +289,12 @@ const handleInitiatePayment = async (req, res) => {
     // Save initial transaction in Firestore
     if (db) {
       try {
+        const sasiData = (sasiResponseData && sasiResponseData.data) || {};
         await db.collection("subscription_payments").doc(reference).set({
           reference: reference,
+          merchantReference: reference,
+          sasiReference: sasiData.reference || "",
+          sasiPaymentId: sasiData.id || "",
           shopId: shopId,
           userId: userId || "",
           planId: planId,
@@ -298,6 +302,7 @@ const handleInitiatePayment = async (req, res) => {
           amount: intAmount,
           durationDays: days,
           customerPhone: formattedPhone,
+          network: network,
           customerName: shopName || "SpareFlow Merchant",
           status: "processing",
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -338,12 +343,14 @@ const handleWebhook = async (req, res) => {
     console.log("Sasi Pay Webhook Callback received:", JSON.stringify(payload));
 
     const data = payload.data || payload;
-    const reference = data.reference || payload.reference;
+    const merchantRef = data.merchant_reference || payload.merchant_reference;
+    const sasiRef = data.reference || payload.reference;
+    const targetRef = merchantRef || sasiRef;
     const rawStatus = (data.status || payload.status || "")
       .toString()
       .toLowerCase();
 
-    if (!reference) {
+    if (!targetRef) {
       console.warn("Webhook missing reference:", payload);
       return res.status(400).json({ error: "Missing reference" });
     }
@@ -353,26 +360,47 @@ const handleWebhook = async (req, res) => {
       return res.status(500).json({ error: "Database not connected" });
     }
 
-    const paymentDocRef = db.collection("subscription_payments").doc(reference);
-    const paymentDoc = await paymentDocRef.get();
+    let paymentDoc = null;
+    let targetDocRef = null;
 
-    let paymentData = null;
-    let targetDocRef = paymentDocRef;
+    if (merchantRef) {
+      const snap = await db.collection("subscription_payments").doc(merchantRef).get();
+      if (snap.exists) {
+        paymentDoc = snap;
+        targetDocRef = snap.ref;
+      }
+    }
 
-    if (paymentDoc.exists) {
-      paymentData = paymentDoc.data();
-    } else {
-      const querySnap = await db
+    if (!paymentDoc && sasiRef) {
+      const snap = await db.collection("subscription_payments").doc(sasiRef).get();
+      if (snap.exists) {
+        paymentDoc = snap;
+        targetDocRef = snap.ref;
+      }
+    }
+
+    if (!paymentDoc) {
+      let querySnap = await db
         .collection("subscription_payments")
-        .where("reference", "==", reference)
+        .where("reference", "==", targetRef)
         .limit(1)
         .get();
 
+      if (querySnap.empty && sasiRef) {
+        querySnap = await db
+          .collection("subscription_payments")
+          .where("sasiReference", "==", sasiRef)
+          .limit(1)
+          .get();
+      }
+
       if (!querySnap.empty) {
+        paymentDoc = querySnap.docs[0];
         targetDocRef = querySnap.docs[0].ref;
-        paymentData = querySnap.docs[0].data();
       }
     }
+
+    let paymentData = paymentDoc ? paymentDoc.data() : null;
 
     // Payment Successful
     if (
@@ -509,8 +537,13 @@ const handleStatusCheck = async (req, res) => {
     // Direct check from Sasi Pay API
     if (SASI_PAY_SECRET_KEY) {
       try {
+        const baseWithoutPayments = cleanBaseUrl.replace(/\/payments\/?$/, "");
+        const sasiQueryRef = (paymentDoc && paymentDoc.exists && paymentDoc.data()?.sasiReference) || reference;
+        const checkUrl = `${baseWithoutPayments}/payments/${sasiQueryRef}`;
+        
+        console.log(`[Sasi Pay Status Check] GET ${checkUrl}`);
         const sasiRes = await axios.get(
-          `${SASI_PAY_BASE_URL}/payments/${reference}`,
+          checkUrl,
           {
             headers: { Authorization: `Bearer ${SASI_PAY_SECRET_KEY}` },
             timeout: 10000,
