@@ -98,16 +98,33 @@ try {
   console.error("Firebase Admin initialization error:", err.message);
 }
 
-// Phone Number formatting helper (Tanzania)
-function formatPhone(phone) {
+// Phone Number formatting helper (Tanzania -> 255XXXXXXXXX)
+function formatPhone255(phone) {
   if (!phone) return "";
   let clean = phone.toString().replace(/[^0-9]/g, "");
   if (clean.startsWith("255") && clean.length === 12) {
-    clean = "0" + clean.substring(3);
-  } else if (clean.startsWith("+255") && clean.length === 13) {
-    clean = "0" + clean.substring(4);
+    return clean;
+  }
+  if (clean.startsWith("0") && clean.length === 10) {
+    return "255" + clean.substring(1);
+  }
+  if (clean.length === 9) {
+    return "255" + clean;
   }
   return clean;
+}
+
+// Detect Mobile Network Operator in Tanzania
+function detectNetwork(phone) {
+  const p = formatPhone255(phone);
+  if (p.length === 12 && p.startsWith("255")) {
+    const prefix = p.substring(3, 5);
+    if (["74", "75", "76"].includes(prefix)) return "VODACOM";
+    if (["71", "65", "67", "77"].includes(prefix)) return "TIGO";
+    if (["68", "69", "78"].includes(prefix)) return "AIRTEL";
+    if (["62", "61"].includes(prefix)) return "HALOTEL";
+  }
+  return "AIRTEL";
 }
 
 // -------------------------------------------------------------
@@ -119,7 +136,8 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     service: "SpareFlow Sasi Pay Backend",
-    version: "1.0.1",
+    version: "1.0.2",
+    formatPhone: "255XXXXXXXXX",
     sasiBaseUrl: SASI_PAY_BASE_URL,
     backendUrl: BACKEND_URL,
     firebaseProject: FIREBASE_PROJECT_ID,
@@ -156,16 +174,17 @@ const handleInitiatePayment = async (req, res) => {
       });
     }
 
-    const formattedPhone = formatPhone(customerPhone);
+    const formattedPhone = formatPhone255(customerPhone);
     if (
-      formattedPhone.length !== 10 ||
-      (!formattedPhone.startsWith("07") && !formattedPhone.startsWith("06"))
+      formattedPhone.length !== 12 ||
+      !formattedPhone.startsWith("255")
     ) {
       return res.status(400).json({
-        error: "Namba ya simu sio sahihi. Tafadhali tumia 07xxxxxxxx au 06xxxxxxxx.",
+        error: "Namba ya simu sio sahihi. Tafadhali tumia 07xxxxxxxx au 06xxxxxxxx (mfano: 0688620614).",
       });
     }
 
+    const network = detectNetwork(formattedPhone);
     const intAmount = parseInt(amount, 10);
     const days = parseInt(durationDays, 10) || 30;
     const reference = `SF-SUB-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -179,10 +198,19 @@ const handleInitiatePayment = async (req, res) => {
       ? sanitizeUrl(process.env.SASI_WEBHOOK_URL, "")
       : `${effectiveBackendUrl}/sasiPayWebhook`;
 
+    const baseWithoutPayments = cleanBaseUrl.replace(/\/payments\/?$/, "");
+    const paymentsEndpoint = `${baseWithoutPayments}/payments/`;
+
     const payload = {
       amount: intAmount,
+      currency: "TZS",
       customer_phone: formattedPhone,
+      phone: formattedPhone,
+      phone_number: formattedPhone,
       payment_method: "mobile_money",
+      network: network,
+      provider: network.toLowerCase(),
+      channel: network.toLowerCase(),
       customer_name: shopName || "SpareFlow Merchant",
       reference: reference,
       narration: `SpareFlow Subscription - ${planName || planId}`,
@@ -192,15 +220,17 @@ const handleInitiatePayment = async (req, res) => {
         userId: userId || "",
         planId: planId,
         durationDays: days,
+        network: network,
       },
     };
 
-    console.log("Inatuma ombi Sasi Pay:", JSON.stringify(payload));
+    console.log(`[Sasi Pay Request] POST ${paymentsEndpoint}`);
+    console.log(`[Sasi Pay Request] Payload:`, JSON.stringify(payload));
 
     let sasiResponseData = null;
     try {
       const sasiResponse = await axios.post(
-        `${SASI_PAY_BASE_URL}/payments`,
+        paymentsEndpoint,
         payload,
         {
           headers: {
@@ -209,18 +239,22 @@ const handleInitiatePayment = async (req, res) => {
             "Idempotency-Key": reference,
           },
           timeout: 25000,
+          maxRedirects: 0,
         }
       );
       sasiResponseData = sasiResponse.data;
-      console.log("Majibu kutoka Sasi Pay:", JSON.stringify(sasiResponseData));
+      console.log(`[Sasi Pay Response] Status ${sasiResponse.status}:`, JSON.stringify(sasiResponseData));
     } catch (apiErr) {
       console.error(
-        "Hitilafu ya Sasi Pay API:",
-        apiErr.response?.data || apiErr.message
+        "[Sasi Pay Error] Status:",
+        apiErr.response?.status,
+        "Data:",
+        JSON.stringify(apiErr.response?.data || apiErr.message)
       );
       const errMsg =
         apiErr.response?.data?.message ||
         apiErr.response?.data?.error ||
+        apiErr.message;
         apiErr.message;
 
       // Save failed record in Firestore if db is ready
@@ -363,8 +397,8 @@ const handleWebhook = async (req, res) => {
         (data.metadata && data.metadata.shopId);
       const durationDays = parseInt(
         (paymentData && paymentData.durationDays) ||
-          (data.metadata && data.metadata.durationDays) ||
-          30,
+        (data.metadata && data.metadata.durationDays) ||
+        30,
         10
       );
       const planId =
