@@ -10,19 +10,37 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
+app.enable("trust proxy");
 app.use(cors({ origin: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Helper to sanitize URLs (always ensure http:// or https:// and no trailing slash)
+function sanitizeUrl(url, defaultUrl) {
+  let clean = (url || defaultUrl || "").toString().trim();
+  if (!clean) return defaultUrl;
+  if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+    clean = "https://" + clean;
+  }
+  return clean.replace(/\/+$/, "");
+}
+
 // Configuration
-const SASI_PAY_BASE_URL =
-  process.env.SASI_PAY_BASE_URL || "https://pay.sasidigital.co.tz/v1";
+let rawBaseUrl = process.env.SASI_PAY_BASE_URL || "https://pay.sasidigital.co.tz/v1";
+let cleanBaseUrl = sanitizeUrl(rawBaseUrl, "https://pay.sasidigital.co.tz/v1");
+if (cleanBaseUrl.endsWith("/payments")) {
+  cleanBaseUrl = cleanBaseUrl.substring(0, cleanBaseUrl.length - "/payments".length);
+}
+const SASI_PAY_BASE_URL = cleanBaseUrl;
+
 const SASI_PAY_SECRET_KEY =
-  process.env.SASI_PAY_SECRET_KEY || "test_04ed2c9368cb9029";
+  (process.env.SASI_PAY_SECRET_KEY || "test_04ed2c9368cb9029").toString().trim();
 const FIREBASE_PROJECT_ID =
-  process.env.FIREBASE_PROJECT_ID || "lito-684b2";
-const BACKEND_URL =
-  process.env.BACKEND_URL || `http://localhost:${PORT}`;
+  (process.env.FIREBASE_PROJECT_ID || "lito-684b2").toString().trim();
+const BACKEND_URL = sanitizeUrl(
+  process.env.BACKEND_URL || "https://spareflow-backend-production.up.railway.app",
+  "https://spareflow-backend-production.up.railway.app"
+);
 
 // Initialize Firebase Admin
 let db = null;
@@ -96,7 +114,9 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     service: "SpareFlow Sasi Pay Backend",
-    version: "1.0.0",
+    version: "1.0.1",
+    sasiBaseUrl: SASI_PAY_BASE_URL,
+    backendUrl: BACKEND_URL,
     firebaseProject: FIREBASE_PROJECT_ID,
     hasFirestore: Boolean(db),
     timestamp: new Date().toISOString(),
@@ -145,12 +165,14 @@ const handleInitiatePayment = async (req, res) => {
     const days = parseInt(durationDays, 10) || 30;
     const reference = `SF-SUB-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const effectiveBackendUrl = process.env.BACKEND_URL
-      ? process.env.BACKEND_URL.replace(/\/$/, "")
-      : `${req.protocol}://${req.get("host")}`;
+    const effectiveBackendUrl = sanitizeUrl(
+      process.env.BACKEND_URL || `${req.protocol}://${req.get("host")}`,
+      BACKEND_URL
+    );
 
-    const webhookUrl =
-      process.env.SASI_WEBHOOK_URL || `${effectiveBackendUrl}/sasiPayWebhook`;
+    const webhookUrl = process.env.SASI_WEBHOOK_URL
+      ? sanitizeUrl(process.env.SASI_WEBHOOK_URL, "")
+      : `${effectiveBackendUrl}/sasiPayWebhook`;
 
     const payload = {
       amount: intAmount,
